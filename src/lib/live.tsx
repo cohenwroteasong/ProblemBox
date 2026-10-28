@@ -1,26 +1,31 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { Problem } from '../../shared/types';
+import type { Answer, BoxSummary, Role } from '../../shared/types';
+import { tk } from './format';
 
-// One EventSource per tab. New problems "pop up" three ways: the live feed on the
-// overview, a toast in the corner, and a highlighted row in the inbox.
+// One EventSource per tab. What "pops up" depends on who is signed in:
+// players see new Boxes and their results; organisations see verified answers.
 
 export interface Toast {
   key: number;
-  problem: Problem;
+  eyebrow: string;
+  title: string;
+  body?: string;
+  href?: string;
+  tone: 'amber' | 'mint' | 'plain';
 }
 
 interface LiveState {
   connected: boolean;
-  /** Problems that arrived since this tab opened, newest first. */
-  arrivals: Problem[];
-  /** Bumps on every created/updated event so views can refetch. */
+  /** Bumps on every event so views can refetch. */
   tick: number;
-  /** IDs that arrived recently, for highlight animations. */
-  fresh: Set<number>;
-  unseen: number;
-  markSeen(): void;
+  /** Boxes released in the last few seconds (players) — for the pop-in animation. */
+  freshBoxes: Set<number>;
+  /** Answers that just arrived (organisations), newest first. */
+  answers: Answer[];
+  freshAnswers: Set<number>;
   toasts: Toast[];
-  dismissToast(key: number): void;
+  dismiss(key: number): void;
+  notify(t: Omit<Toast, 'key'>): void;
   popups: boolean;
   setPopups(on: boolean): void;
 }
@@ -36,70 +41,108 @@ function readPopups() {
   }
 }
 
-export function LiveProvider({ children }: { children: ReactNode }) {
+function useFlashSet(ms: number) {
+  const [set, setSet] = useState<Set<number>>(new Set());
+  const add = useCallback(
+    (id: number) => {
+      setSet((s) => new Set(s).add(id));
+      setTimeout(
+        () =>
+          setSet((s) => {
+            const next = new Set(s);
+            next.delete(id);
+            return next;
+          }),
+        ms,
+      );
+    },
+    [ms],
+  );
+  return [set, add] as const;
+}
+
+export function LiveProvider({ role, children }: { role: Role; children: ReactNode }) {
   const [connected, setConnected] = useState(false);
-  const [arrivals, setArrivals] = useState<Problem[]>([]);
   const [tick, setTick] = useState(0);
-  const [fresh, setFresh] = useState<Set<number>>(new Set());
-  const [unseen, setUnseen] = useState(0);
+  const [answers, setAnswers] = useState<Answer[]>([]);
+  const [freshBoxes, flashBox] = useFlashSet(8000);
+  const [freshAnswers, flashAnswer] = useFlashSet(6000);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [popups, setPopupsState] = useState(readPopups);
   const popupsRef = useRef(popups);
   popupsRef.current = popups;
-  const toastKey = useRef(0);
+  const keyRef = useRef(0);
+  const lastAnswerToast = useRef(0);
 
-  const dismissToast = useCallback((key: number) => setToasts((t) => t.filter((x) => x.key !== key)), []);
+  const dismiss = useCallback((key: number) => setToasts((t) => t.filter((x) => x.key !== key)), []);
+  const notify = useCallback(
+    (t: Omit<Toast, 'key'>) => {
+      if (!popupsRef.current) return;
+      const key = ++keyRef.current;
+      setToasts((list) => [...list.slice(-2), { ...t, key }]);
+      setTimeout(() => dismiss(key), 7000);
+    },
+    [dismiss],
+  );
 
   useEffect(() => {
     const es = new EventSource('/api/stream');
     es.addEventListener('ready', () => setConnected(true));
     es.addEventListener('error', () => setConnected(false));
-    es.addEventListener('problem', (e) => {
-      const { type, problem } = JSON.parse((e as MessageEvent).data) as { type: 'created' | 'updated'; problem: Problem };
+
+    es.addEventListener('box', (e) => {
+      const { type, box } = JSON.parse((e as MessageEvent).data) as { type: 'released' | 'updated' | 'closed'; box: BoxSummary };
       setTick((t) => t + 1);
-      if (type === 'updated') {
-        setArrivals((list) => list.map((p) => (p.id === problem.id ? problem : p)));
-        return;
+      if (type === 'released' && role === 'player') {
+        flashBox(box.id);
+        notify({ eyebrow: 'New Box is open', title: box.title, body: `${tk(box.pool)} pool · about ${box.minutes} min`, href: `/play/box/${box.id}`, tone: 'amber' });
       }
-      setArrivals((list) => [problem, ...list.filter((p) => p.id !== problem.id)].slice(0, 40));
-      setUnseen((n) => n + 1);
-      setFresh((s) => new Set(s).add(problem.id));
-      setTimeout(() => {
-        setFresh((s) => {
-          const next = new Set(s);
-          next.delete(problem.id);
-          return next;
-        });
-      }, 6000);
-      if (popupsRef.current) {
-        const key = ++toastKey.current;
-        setToasts((t) => [...t.slice(-2), { key, problem }]);
-        setTimeout(() => dismissToast(key), 6500);
+      if (type === 'closed' && role === 'org') {
+        notify({ eyebrow: 'Box closed and scored', title: box.title, body: `${box.verified} verified answers`, href: `/org/boxes/${box.id}`, tone: 'plain' });
       }
     });
-    return () => es.close();
-  }, [dismissToast]);
 
-  // Unseen count in the tab title, so a backgrounded tab still shows activity.
-  useEffect(() => {
-    const base = 'Kontho';
-    document.title = unseen > 0 ? `(${unseen}) ${base}` : base;
-  }, [unseen]);
+    es.addEventListener('answer', (e) => {
+      const a = JSON.parse((e as MessageEvent).data) as Answer;
+      setTick((t) => t + 1);
+      if (!a.passed) return;
+      setAnswers((list) => [a, ...list.filter((x) => x.id !== a.id)].slice(0, 40));
+      flashAnswer(a.id);
+      // At most one pop-up every few seconds; the live feeds show every answer.
+      const now = Date.now();
+      if (now - lastAnswerToast.current > 8000) {
+        lastAnswerToast.current = now;
+        notify({ eyebrow: 'New verified answer', title: `“${a.idea}”`, body: `${a.boxTitle} · ${a.division}`, href: `/org/boxes/${a.boxId}`, tone: 'plain' });
+      }
+    });
+
+    es.addEventListener('results', (e) => {
+      const r = JSON.parse((e as MessageEvent).data) as { boxId: number; title: string; total: number };
+      setTick((t) => t + 1);
+      notify({
+        eyebrow: 'Results are in',
+        title: r.total > 0 ? `+${tk(r.total)} added to your wallet` : 'No points this time',
+        body: r.title,
+        href: `/play/results/${r.boxId}`,
+        tone: r.total > 0 ? 'mint' : 'plain',
+      });
+    });
+
+    return () => es.close();
+  }, [role, notify, flashBox, flashAnswer]);
 
   const setPopups = useCallback((on: boolean) => {
     setPopupsState(on);
     try {
       localStorage.setItem(POPUP_KEY, on ? 'on' : 'off');
     } catch {
-      // Storage unavailable: preference lasts for this tab only.
+      // Storage unavailable: the choice lasts for this tab only.
     }
   }, []);
 
-  const markSeen = useCallback(() => setUnseen(0), []);
-
   const value = useMemo<LiveState>(
-    () => ({ connected, arrivals, tick, fresh, unseen, markSeen, toasts, dismissToast, popups, setPopups }),
-    [connected, arrivals, tick, fresh, unseen, markSeen, toasts, dismissToast, popups, setPopups],
+    () => ({ connected, tick, freshBoxes, answers, freshAnswers, toasts, dismiss, notify, popups, setPopups }),
+    [connected, tick, freshBoxes, answers, freshAnswers, toasts, dismiss, notify, popups, setPopups],
   );
   return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>;
 }
@@ -108,4 +151,19 @@ export function useLive() {
   const ctx = useContext(LiveContext);
   if (!ctx) throw new Error('useLive must be used inside <LiveProvider>');
   return ctx;
+}
+
+/** Refetch when live events arrive, at most once every two seconds. */
+export function useLiveReload(reload: () => unknown) {
+  const { tick } = useLive();
+  const last = useRef(0);
+  useEffect(() => {
+    if (!tick) return;
+    const wait = Math.max(0, last.current + 2000 - Date.now());
+    const t = setTimeout(() => {
+      last.current = Date.now();
+      void reload();
+    }, wait);
+    return () => clearTimeout(t);
+  }, [tick, reload]);
 }

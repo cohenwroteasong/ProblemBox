@@ -1,18 +1,16 @@
+/** The Kontho mark: ক with a voice line, on an Ink tile. */
 export function LogoMark({ size = 32 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true" className="shrink-0">
-      <rect width="32" height="32" rx="9" fill="var(--brand)" />
-      <path d="M8.5 10.5A2.5 2.5 0 0 1 11 8h10a2.5 2.5 0 0 1 2.5 2.5v7.5a2.5 2.5 0 0 1-2.5 2.5h-5.6l-4.3 3.5c-.55.45-1.35.05-1.35-.65V20.5A2.5 2.5 0 0 1 8.5 18z" fill="#fff" />
-      <path d="M12.75 12.75v3.5M16 11.25v6.5M19.25 12.75v3.5" stroke="var(--brand)" strokeWidth="1.9" strokeLinecap="round" />
-    </svg>
-  );
+  return <img src="/brand/kontho-mark.svg" width={size} height={size} alt="" aria-hidden className="shrink-0 rounded-[22%]" />;
 }
 
-export function Logo({ size = 32, light = false }: { size?: number; light?: boolean }) {
+/** Horizontal logo; `reversed` is the Cream version for Ink grounds. */
+export function Logo({ reversed = false, height = 30 }: { reversed?: boolean; height?: number }) {
   return (
-    <span className="inline-flex items-center gap-2.5">
-      <LogoMark size={size} />
-      <span className={`text-[1.0625rem] font-bold tracking-tight ${light ? 'text-side-ink' : 'text-ink'}`}>Kontho</span>
-    </span>
+    <img
+      src={reversed ? '/brand/kontho-logo-horizontal-reversed.svg' : '/brand/kontho-logo-horizontal.svg'}
+      alt="Kontho (কণ্ঠ)"
+      style={{ height, width: 'auto' }}
+      className="block shrink-0 self-start"
+    />
   );
 }

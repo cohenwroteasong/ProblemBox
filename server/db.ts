@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import type { Box, Category, Priority, Problem, ProblemSource, Status, User } from '../shared/types.ts';
+import type { BoxStatus, BoxSummary, OrgBox, OrgQuestion, Role, Theme, User } from '../shared/types.ts';
 
 const file = resolve(process.env.DATABASE_PATH ?? 'data/kontho.db');
 mkdirSync(dirname(file), { recursive: true });
@@ -9,15 +9,31 @@ mkdirSync(dirname(file), { recursive: true });
 export const db = new DatabaseSync(file);
 db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000;');
 
+// Bump when the schema changes; older local databases are rebuilt (they only hold sample data).
+const SCHEMA_VERSION = 2;
+const { user_version } = db.prepare('PRAGMA user_version').get() as { user_version: number };
+if (user_version !== SCHEMA_VERSION) {
+  db.exec('PRAGMA foreign_keys = OFF');
+  const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).all() as { name: string }[];
+  for (const t of tables) db.exec(`DROP TABLE IF EXISTS "${t.name}"`);
+  db.exec('PRAGMA foreign_keys = ON');
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY,
-    name          TEXT NOT NULL,
-    email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    org           TEXT NOT NULL DEFAULT '',
-    password_hash TEXT NOT NULL,
-    demo_feed     INTEGER NOT NULL DEFAULT 0,
-    created_at    INTEGER NOT NULL
+    id              INTEGER PRIMARY KEY,
+    role            TEXT NOT NULL CHECK (role IN ('player', 'org')),
+    name            TEXT NOT NULL,
+    email           TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash   TEXT NOT NULL,
+    org             TEXT NOT NULL DEFAULT '',
+    phone           TEXT NOT NULL DEFAULT '',
+    division        TEXT NOT NULL DEFAULT '',
+    gender          TEXT NOT NULL DEFAULT '',
+    age_band        TEXT NOT NULL DEFAULT '',
+    consent_contact INTEGER NOT NULL DEFAULT 0,
+    demo_feed       INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS sessions (
@@ -28,70 +44,116 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS boxes (
-    id          INTEGER PRIMARY KEY,
-    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name        TEXT NOT NULL,
-    slug        TEXT NOT NULL UNIQUE,
-    description TEXT NOT NULL DEFAULT '',
-    color       TEXT NOT NULL,
-    is_open     INTEGER NOT NULL DEFAULT 1,
-    created_at  INTEGER NOT NULL
+    id             INTEGER PRIMARY KEY,
+    org_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    template       TEXT NOT NULL DEFAULT '',
+    title          TEXT NOT NULL,
+    title_bn       TEXT NOT NULL DEFAULT '',
+    topic          TEXT NOT NULL DEFAULT '',
+    description    TEXT NOT NULL DEFAULT '',
+    brief          TEXT NOT NULL DEFAULT '',
+    pool           INTEGER NOT NULL,
+    target         INTEGER NOT NULL,
+    minutes        INTEGER NOT NULL,
+    duration_hours INTEGER NOT NULL DEFAULT 24,
+    questions      TEXT NOT NULL,
+    themes         TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'draft',
+    sample         INTEGER NOT NULL DEFAULT 0,
+    released_at    INTEGER,
+    closes_at      INTEGER,
+    closed_at      INTEGER,
+    created_at     INTEGER NOT NULL
   );
 
-  CREATE TABLE IF NOT EXISTS problems (
-    id                INTEGER PRIMARY KEY,
-    box_id            INTEGER NOT NULL REFERENCES boxes(id) ON DELETE CASCADE,
-    title             TEXT NOT NULL,
-    body              TEXT NOT NULL DEFAULT '',
-    category          TEXT NOT NULL,
-    priority          TEXT NOT NULL DEFAULT 'normal',
-    status            TEXT NOT NULL DEFAULT 'new',
-    author            TEXT,
-    contact           TEXT,
-    source            TEXT NOT NULL DEFAULT 'web',
-    auto_flag         TEXT,
-    created_at        INTEGER NOT NULL,
-    updated_at        INTEGER NOT NULL,
-    first_response_at INTEGER,
-    resolved_at       INTEGER
+  CREATE TABLE IF NOT EXISTS responses (
+    id             INTEGER PRIMARY KEY,
+    box_id         INTEGER NOT NULL REFERENCES boxes(id) ON DELETE CASCADE,
+    player_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    division       TEXT NOT NULL,
+    gender         TEXT NOT NULL,
+    age_band       TEXT NOT NULL,
+    answers        TEXT NOT NULL,
+    idea           TEXT NOT NULL DEFAULT '',
+    prediction     TEXT,
+    theme_id       TEXT,
+    passed         INTEGER NOT NULL,
+    fail_reason    TEXT,
+    duration_sec   INTEGER NOT NULL,
+    consent        INTEGER NOT NULL DEFAULT 0,
+    simulated      INTEGER NOT NULL DEFAULT 0,
+    points         REAL NOT NULL DEFAULT 0,
+    pool_share     REAL NOT NULL DEFAULT 0,
+    prediction_bonus REAL NOT NULL DEFAULT 0,
+    consent_bonus  REAL NOT NULL DEFAULT 0,
+    created_at     INTEGER NOT NULL,
+    UNIQUE (box_id, player_id)
   );
 
-  CREATE TABLE IF NOT EXISTS events (
+  CREATE TABLE IF NOT EXISTS ledger (
     id         INTEGER PRIMARY KEY,
-    problem_id INTEGER NOT NULL REFERENCES problems(id) ON DELETE CASCADE,
-    user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    player_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    amount     REAL NOT NULL,
     kind       TEXT NOT NULL,
-    data       TEXT NOT NULL DEFAULT '{}',
+    label      TEXT NOT NULL,
+    box_id     INTEGER REFERENCES boxes(id) ON DELETE SET NULL,
     created_at INTEGER NOT NULL
   );
 
-  CREATE INDEX IF NOT EXISTS idx_boxes_user ON boxes(user_id);
-  CREATE INDEX IF NOT EXISTS idx_problems_box_created ON problems(box_id, created_at);
-  CREATE INDEX IF NOT EXISTS idx_events_problem ON events(problem_id, created_at);
+  CREATE TABLE IF NOT EXISTS withdrawals (
+    id         INTEGER PRIMARY KEY,
+    player_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    method     TEXT NOT NULL,
+    amount     REAL NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'queued',
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_boxes_org ON boxes(org_id);
+  CREATE INDEX IF NOT EXISTS idx_boxes_status ON boxes(status);
+  CREATE INDEX IF NOT EXISTS idx_responses_box ON responses(box_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_responses_player ON responses(player_id);
+  CREATE INDEX IF NOT EXISTS idx_ledger_player ON ledger(player_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 `);
+db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 
-/** Run `fn` inside a transaction, rolling back if it throws. */
+let depth = 0;
+
+/** Run `fn` inside a transaction (a savepoint when nested), rolling back if it throws. */
 export function tx<T>(fn: () => T): T {
-  db.exec('BEGIN');
+  const sp = `sp${depth}`;
+  db.exec(depth === 0 ? 'BEGIN' : `SAVEPOINT ${sp}`);
+  depth++;
   try {
     const result = fn();
-    db.exec('COMMIT');
+    depth--;
+    db.exec(depth === 0 ? 'COMMIT' : `RELEASE ${sp}`);
     return result;
   } catch (err) {
-    db.exec('ROLLBACK');
+    depth--;
+    db.exec(depth === 0 ? 'ROLLBACK' : `ROLLBACK TO ${sp}; RELEASE ${sp}`);
     throw err;
   }
 }
 
-// ---------- row types & mappers ----------
+/** Taka amounts are kept to the paisa. */
+export const money = (n: number) => Math.round(n * 100) / 100;
+
+// ---------- users ----------
 
 export interface UserRow {
   id: number;
+  role: Role;
   name: string;
   email: string;
-  org: string;
   password_hash: string;
+  org: string;
+  phone: string;
+  division: string;
+  gender: string;
+  age_band: string;
+  consent_contact: number;
   demo_feed: number;
   created_at: number;
 }
@@ -99,173 +161,218 @@ export interface UserRow {
 export function toUser(row: UserRow): User {
   return {
     id: row.id,
+    role: row.role,
     name: row.name,
     email: row.email,
     org: row.org,
+    phone: row.phone,
+    division: row.division,
+    gender: row.gender,
+    ageBand: row.age_band,
+    consentContact: row.consent_contact === 1,
     demoFeed: row.demo_feed === 1,
     createdAt: row.created_at,
   };
 }
 
-interface BoxRow {
+export const getUserRow = (id: number) => db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
+
+// ---------- boxes ----------
+
+export interface BoxRow {
   id: number;
-  name: string;
-  slug: string;
+  org_id: number;
+  template: string;
+  title: string;
+  title_bn: string;
+  topic: string;
   description: string;
-  color: string;
-  is_open: number;
+  brief: string;
+  pool: number;
+  target: number;
+  minutes: number;
+  duration_hours: number;
+  questions: string;
+  themes: string;
+  status: BoxStatus;
+  sample: number;
+  released_at: number | null;
+  closes_at: number | null;
+  closed_at: number | null;
   created_at: number;
-  total: number;
-  open: number;
-  resolved: number;
-  last_problem_at: number | null;
+  received?: number;
+  verified?: number;
 }
 
+/** Box columns plus response counts. */
 export const BOX_SELECT = `
-  SELECT b.id, b.name, b.slug, b.description, b.color, b.is_open, b.created_at,
-         COUNT(p.id) AS total,
-         COALESCE(SUM(p.status IN ('new', 'in_progress')), 0) AS open,
-         COALESCE(SUM(p.status = 'resolved'), 0) AS resolved,
-         MAX(p.created_at) AS last_problem_at
-    FROM boxes b
-    LEFT JOIN problems p ON p.box_id = b.id`;
+  SELECT b.*,
+         (SELECT COUNT(*) FROM responses r WHERE r.box_id = b.id) AS received,
+         (SELECT COUNT(*) FROM responses r WHERE r.box_id = b.id AND r.passed = 1) AS verified
+    FROM boxes b`;
 
-export function toBox(row: BoxRow): Box {
+export function toBoxSummary(row: BoxRow): BoxSummary {
   return {
     id: row.id,
-    name: row.name,
-    slug: row.slug,
-    description: row.description,
-    color: row.color,
-    isOpen: row.is_open === 1,
-    createdAt: row.created_at,
-    total: Number(row.total),
-    open: Number(row.open),
-    resolved: Number(row.resolved),
-    lastProblemAt: row.last_problem_at,
-  };
-}
-
-export interface ProblemRow {
-  id: number;
-  box_id: number;
-  box_name: string;
-  box_color: string;
-  title: string;
-  body: string;
-  category: string;
-  priority: string;
-  status: string;
-  author: string | null;
-  contact: string | null;
-  source: string;
-  auto_flag: string | null;
-  created_at: number;
-  updated_at: number;
-  first_response_at: number | null;
-  resolved_at: number | null;
-}
-
-export const PROBLEM_SELECT = `
-  SELECT p.*, b.name AS box_name, b.color AS box_color
-    FROM problems p
-    JOIN boxes b ON b.id = p.box_id`;
-
-export function toProblem(row: ProblemRow): Problem {
-  return {
-    id: row.id,
-    boxId: row.box_id,
-    boxName: row.box_name,
-    boxColor: row.box_color,
     title: row.title,
-    body: row.body,
-    category: row.category as Category,
-    priority: row.priority as Priority,
-    status: row.status as Status,
-    author: row.author,
-    contact: row.contact,
-    source: row.source as ProblemSource,
-    autoFlag: row.auto_flag,
+    titleBn: row.title_bn,
+    topic: row.topic,
+    description: row.description,
+    pool: row.pool,
+    target: row.target,
+    minutes: row.minutes,
+    questionCount: (JSON.parse(row.questions) as unknown[]).length,
+    status: row.status,
+    releasedAt: row.released_at,
+    closesAt: row.closes_at,
+    closedAt: row.closed_at,
     createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    firstResponseAt: row.first_response_at,
-    resolvedAt: row.resolved_at,
+    received: Number(row.received ?? 0),
+    verified: Number(row.verified ?? 0),
+    sample: row.sample === 1,
   };
 }
 
-export function getProblem(id: number, userId: number): Problem | null {
-  const row = db.prepare(`${PROBLEM_SELECT} WHERE p.id = ? AND b.user_id = ?`).get(id, userId) as ProblemRow | undefined;
-  return row ? toProblem(row) : null;
+export function toOrgBox(row: BoxRow): OrgBox {
+  return {
+    ...toBoxSummary(row),
+    brief: row.brief,
+    durationHours: row.duration_hours,
+    questions: JSON.parse(row.questions) as OrgQuestion[],
+    themes: JSON.parse(row.themes) as Theme[],
+  };
 }
 
-export function getBox(id: number, userId: number): Box | null {
-  const row = db.prepare(`${BOX_SELECT} WHERE b.id = ? AND b.user_id = ? GROUP BY b.id`).get(id, userId) as BoxRow | undefined;
-  return row ? toBox(row) : null;
-}
+export const getBoxRow = (id: number) => db.prepare(`${BOX_SELECT} WHERE b.id = ?`).get(id) as BoxRow | undefined;
 
-export function listBoxes(userId: number): Box[] {
-  const rows = db.prepare(`${BOX_SELECT} WHERE b.user_id = ? GROUP BY b.id ORDER BY b.created_at`).all(userId) as unknown as BoxRow[];
-  return rows.map(toBox);
-}
-
-export function slugify(name: string): string {
-  const base =
-    name
-      .toLowerCase()
-      .normalize('NFKD')
-      .replace(/[^\w\s-]/g, '')
-      .trim()
-      .replace(/[\s_-]+/g, '-')
-      .slice(0, 40) || 'box';
-  const exists = db.prepare('SELECT 1 FROM boxes WHERE slug = ?');
-  if (!exists.get(base)) return base;
-  for (;;) {
-    const candidate = `${base}-${Math.random().toString(36).slice(2, 6)}`;
-    if (!exists.get(candidate)) return candidate;
-  }
-}
-
-export interface NewProblem {
-  boxId: number;
+export interface NewBox {
+  orgId: number;
+  template: string;
   title: string;
-  body: string;
-  category: Category;
-  priority: Priority;
-  status?: Status;
-  author?: string | null;
-  contact?: string | null;
-  source: ProblemSource;
-  autoFlag?: string | null;
+  titleBn: string;
+  topic: string;
+  description: string;
+  brief: string;
+  pool: number;
+  target: number;
+  minutes: number;
+  durationHours: number;
+  questions: OrgQuestion[];
+  themes: Theme[];
+  status: BoxStatus;
+  sample: boolean;
+  releasedAt?: number | null;
+  closesAt?: number | null;
+  closedAt?: number | null;
   createdAt: number;
 }
 
-export function insertProblem(p: NewProblem): number {
-  const result = db
+export function insertBox(b: NewBox): number {
+  const r = db
     .prepare(
-      `INSERT INTO problems (box_id, title, body, category, priority, status, author, contact, source, auto_flag, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO boxes (org_id, template, title, title_bn, topic, description, brief, pool, target, minutes, duration_hours,
+                          questions, themes, status, sample, released_at, closes_at, closed_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
-      p.boxId,
-      p.title,
-      p.body,
-      p.category,
-      p.priority,
-      p.status ?? 'new',
-      p.author ?? null,
-      p.contact ?? null,
-      p.source,
-      p.autoFlag ?? null,
-      p.createdAt,
-      p.createdAt,
+      b.orgId,
+      b.template,
+      b.title,
+      b.titleBn,
+      b.topic,
+      b.description,
+      b.brief,
+      b.pool,
+      b.target,
+      b.minutes,
+      b.durationHours,
+      JSON.stringify(b.questions),
+      JSON.stringify(b.themes),
+      b.status,
+      b.sample ? 1 : 0,
+      b.releasedAt ?? null,
+      b.closesAt ?? null,
+      b.closedAt ?? null,
+      b.createdAt,
     );
-  const id = Number(result.lastInsertRowid);
-  db.prepare(`INSERT INTO events (problem_id, kind, data, created_at) VALUES (?, 'created', '{}', ?)`).run(id, p.createdAt);
-  return id;
+  return Number(r.lastInsertRowid);
 }
 
-/** Owner of the box, used to route live events. */
-export function boxOwner(boxId: number): number | null {
-  const row = db.prepare('SELECT user_id FROM boxes WHERE id = ?').get(boxId) as { user_id: number } | undefined;
-  return row?.user_id ?? null;
+// ---------- responses ----------
+
+export interface ResponseRow {
+  id: number;
+  box_id: number;
+  player_id: number | null;
+  division: string;
+  gender: string;
+  age_band: string;
+  answers: string;
+  idea: string;
+  prediction: string | null;
+  theme_id: string | null;
+  passed: number;
+  fail_reason: string | null;
+  duration_sec: number;
+  consent: number;
+  simulated: number;
+  points: number;
+  pool_share: number;
+  prediction_bonus: number;
+  consent_bonus: number;
+  created_at: number;
+}
+
+export interface NewResponse {
+  boxId: number;
+  playerId: number | null;
+  division: string;
+  gender: string;
+  ageBand: string;
+  answers: Record<string, string | number>;
+  idea: string;
+  prediction: string | null;
+  themeId: string | null;
+  passed: boolean;
+  failReason: string | null;
+  durationSec: number;
+  consent: boolean;
+  simulated: boolean;
+  createdAt: number;
+}
+
+export function insertResponse(r: NewResponse): number {
+  const result = db
+    .prepare(
+      `INSERT INTO responses (box_id, player_id, division, gender, age_band, answers, idea, prediction, theme_id,
+                              passed, fail_reason, duration_sec, consent, simulated, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      r.boxId,
+      r.playerId,
+      r.division,
+      r.gender,
+      r.ageBand,
+      JSON.stringify(r.answers),
+      r.idea,
+      r.prediction,
+      r.themeId,
+      r.passed ? 1 : 0,
+      r.failReason,
+      r.durationSec,
+      r.consent ? 1 : 0,
+      r.simulated ? 1 : 0,
+      r.createdAt,
+    );
+  return Number(result.lastInsertRowid);
+}
+
+export function credit(playerId: number, amount: number, kind: string, label: string, boxId: number | null, at: number) {
+  db.prepare('INSERT INTO ledger (player_id, amount, kind, label, box_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(playerId, money(amount), kind, label, boxId, at);
+}
+
+export function balanceOf(playerId: number): number {
+  const row = db.prepare('SELECT COALESCE(SUM(amount), 0) AS b FROM ledger WHERE player_id = ?').get(playerId) as { b: number };
+  return money(row.b);
 }

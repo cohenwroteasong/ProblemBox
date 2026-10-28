@@ -2,19 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#16141d" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#121A27" />
+    <meta name="description" content="Kontho (কণ্ঠ) — Real voices, verified. Players answer Boxes and earn; organisations get verified insight." />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <title>Kontho</title>
-    <script>
-      // Resolve the theme before first paint so there is no light/dark flash.
-      (function () {
-        var pref = 'system';
-        try { pref = localStorage.getItem('kontho-theme') || 'system'; } catch (e) {}
-        var dark = pref === 'dark' || (pref === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
-        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-      })();
-    </script>
+    <title>Kontho · Real voices, verified.</title>
   </head>
   <body>
     <div id="root"></div>

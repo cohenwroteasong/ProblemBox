@@ -2,11 +2,13 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import type { User } from '../../shared/types';
 import { api, ApiError } from './api';
 
+export type SignupInput = Record<string, unknown> & { role: 'player' | 'org'; name: string; email: string; password: string };
+
 interface AuthState {
   /** undefined while the session is being checked. */
   user: User | null | undefined;
   login(email: string, password: string): Promise<User>;
-  signup(input: { name: string; org: string; email: string; password: string }): Promise<User>;
+  signup(input: SignupInput): Promise<User>;
   logout(): Promise<void>;
   setUser(user: User): void;
 }
@@ -31,7 +33,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return r.user;
   }, []);
 
-  const signup = useCallback(async (input: { name: string; org: string; email: string; password: string }) => {
+  const signup = useCallback(async (input: SignupInput) => {
     const r = await api<{ user: User }>('/auth/signup', { body: input });
     setUserState(r.user);
     return r.user;
@@ -61,3 +63,5 @@ export function useUser(): User {
   if (!user) throw new Error('useUser called without a signed-in user');
   return user;
 }
+
+export const homeFor = (u: User) => (u.role === 'org' ? '/org' : '/play');

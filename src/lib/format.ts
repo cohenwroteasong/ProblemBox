@@ -1,22 +1,16 @@
-import type { Priority, Status } from '../../shared/types';
+import type { FailReason, QuestionRole } from '../../shared/types';
 
-export const STATUS_LABEL: Record<Status, string> = {
-  new: 'New',
-  in_progress: 'In progress',
-  resolved: 'Resolved',
-  dismissed: 'Dismissed',
-};
+/** Taka with Indian digit grouping, as on konthoglobal.com: ৳1,00,000 or ৳34.20. */
+export const tk = (n: number) => `৳${n.toLocaleString('en-IN', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
+export const tk0 = (n: number) => `৳${Math.round(n).toLocaleString('en-IN')}`;
+export const num = (n: number) => n.toLocaleString('en-IN');
+export const pct = (x: number | null) => (x === null ? '—' : `${Math.round(x * 100)}%`);
 
-export const PRIORITY_LABEL: Record<Priority, string> = {
-  urgent: 'Urgent',
-  high: 'High',
-  normal: 'Normal',
-  low: 'Low',
-};
+const BN_DIGITS = '০১২৩৪৫৬৭৮৯';
+export const bn = (v: number | string) => String(v).replace(/\d/g, (d) => BN_DIGITS[Number(d)]);
 
 const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto', style: 'short' });
 
-/** "just now", "4 min ago", "3 hr ago", "yesterday", then a date. */
 export function timeAgo(ts: number, now = Date.now()): string {
   const s = Math.round((now - ts) / 1000);
   if (s < 45) return 'just now';
@@ -26,40 +20,28 @@ export function timeAgo(ts: number, now = Date.now()): string {
   if (h < 24) return rtf.format(-h, 'hour');
   const d = Math.round(h / 24);
   if (d < 7) return rtf.format(-d, 'day');
-  return new Date(ts).toLocaleDateString('en', { day: 'numeric', month: 'short', year: new Date(ts).getFullYear() === new Date(now).getFullYear() ? undefined : 'numeric' });
+  return dateShort(ts);
 }
 
-export function dateTime(ts: number): string {
-  return new Date(ts).toLocaleString('en', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+/** "2h 14m left", "9 min left", "closing now" */
+export function timeLeft(ts: number | null, now = Date.now()): string {
+  if (ts === null) return '';
+  const s = Math.round((ts - now) / 1000);
+  if (s <= 30) return 'closing now';
+  const m = Math.ceil(s / 60);
+  if (m < 60) return `${m} min left`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ${m % 60}m left`;
+  return `${Math.round(h / 24)} days left`;
 }
 
-/** Durations given in hours: "45 min", "6.5 hr", "2.3 days". */
-export function duration(hours: number | null): string {
-  if (hours === null || !Number.isFinite(hours)) return '—';
-  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))} min`;
-  if (hours < 48) return `${hours < 10 ? hours.toFixed(1).replace(/\.0$/, '') : Math.round(hours)} hr`;
-  const days = hours / 24;
-  return `${days < 10 ? days.toFixed(1).replace(/\.0$/, '') : Math.round(days)} days`;
-}
-
-export function compact(n: number): string {
-  return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
-}
-
-export function percent(x: number | null): string {
-  if (x === null) return '—';
-  return `${Math.round(x * 100)}%`;
-}
-
-/** Signed relative change, e.g. +12%. Returns null when there's no baseline. */
-export function change(cur: number | null, prev: number | null): number | null {
-  if (cur === null || prev === null || prev === 0) return null;
-  return (cur - prev) / prev;
-}
+export const clock = (ts: number) => new Date(ts).toLocaleTimeString('en', { hour: 'numeric', minute: '2-digit' });
+export const dateShort = (ts: number) => new Date(ts).toLocaleDateString('en', { day: 'numeric', month: 'short' });
+export const dateTime = (ts: number) => new Date(ts).toLocaleString('en', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 
 export function greeting(date = new Date()): string {
   const h = date.getHours();
-  if (h < 5) return 'Working late';
+  if (h < 5) return 'Good night';
   if (h < 12) return 'Good morning';
   if (h < 17) return 'Good afternoon';
   return 'Good evening';
@@ -74,6 +56,29 @@ export function initials(name: string): string {
     .join('');
 }
 
-export function shortDate(iso: string): string {
-  return new Date(`${iso}T00:00:00`).toLocaleDateString('en', { day: 'numeric', month: 'short' });
-}
+export const FAIL_TEXT: Record<FailReason, string> = {
+  screened_out: 'Not in this Box’s audience',
+  too_fast: 'Answered too fast to have read the questions',
+  failed_check: 'Missed the hidden reading check',
+  low_effort: 'The idea answer was too short',
+  copied: 'The idea answer matched other answers word for word',
+  duplicate_device: 'Same device as another account',
+};
+
+/** How each question role is labelled for players. */
+export const ROLE_LABEL: Record<QuestionRole, string> = {
+  screener: 'A quick question first',
+  measured: 'About you · not scored',
+  idea: 'Your idea · decides your pool share',
+  check: 'Quick question',
+  prediction: 'Prediction · bonus if you’re right',
+};
+
+/** How each question role is labelled for organisations. */
+export const ROLE_ORG: Record<QuestionRole, string> = {
+  screener: 'Screener',
+  measured: 'Measured · never scored',
+  idea: 'Idea · scored by rank',
+  check: 'Hidden check',
+  prediction: 'Prediction · bonus',
+};

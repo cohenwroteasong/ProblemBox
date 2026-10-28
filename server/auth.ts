@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import type { Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { createMiddleware } from 'hono/factory';
+import type { Role } from '../shared/types.ts';
 import { db, type UserRow } from './db.ts';
 
 const scryptAsync = promisify(scrypt) as (pw: string, salt: Buffer, keylen: number) => Promise<Buffer>;
@@ -71,6 +72,15 @@ export const requireUser = createMiddleware<AuthEnv>(async (c, next) => {
   c.set('user', user);
   await next();
 });
+
+export const requireRole = (role: Role) =>
+  createMiddleware<AuthEnv>(async (c, next) => {
+    const user = sessionUser(c);
+    if (!user) return c.json({ error: 'Please sign in to continue.' }, 401);
+    if (user.role !== role) return c.json({ error: role === 'org' ? 'This page is for organisation accounts.' : 'This page is for player accounts.' }, 403);
+    c.set('user', user);
+    await next();
+  });
 
 /**
  * State-changing requests must be JSON. Browsers can't send a cross-site JSON
